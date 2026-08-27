@@ -2,6 +2,15 @@ name = "broad-star-cbc0"
 main = "worker.js"
 compatibility_date = "2026-08-27"
 
+# KV namespace 暂不填真实 ID。
+# 创建 Cloudflare KV 后，将下面两行取消注释并替换成你的 namespace ID：
+# [[kv_namespaces]]
+# binding = "RISK_KV"
+# id = "YOUR_KV_NAMESPACE_ID"
+
+[triggers]
+crons = ["17 2 * * *"]
+
 [assets]
 directory = "./site"
 not_found_handling = "single-page-application"
