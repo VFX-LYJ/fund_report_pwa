@@ -1,247 +1,100 @@
 const CSRC_SEARCH = 'https://www.csrc.gov.cn/guestweb4/s';
 const EASTMONEY_FUND = code => `https://fund.eastmoney.com/${encodeURIComponent(code)}.html`;
-const CACHE_VERSION = 'v14.1';
+const CACHE_VERSION = 'v14.2-associated';
 const TTL = 12 * 60 * 60;
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Cache-Control': 'no-store'
-};
+const CORS = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,OPTIONS','Access-Control-Allow-Headers':'Content-Type','Cache-Control':'no-store'};
 
-function responseJSON(data, status = 200, extra = {}) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json;charset=UTF-8', ...CORS, ...extra }
-  });
-}
+function responseJSON(data,status=200,extra={}){return new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json;charset=UTF-8',...CORS,...extra}})}
+function decodeHtml(s=''){return String(s).replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(Number(n))).replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCharCode(parseInt(n,16))).replace(/&quot;/g,'"').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&#39;/g,"'")}
+function clean(s=''){return decodeHtml(s).replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim()}
+function absUrl(href){try{return new URL(decodeHtml(href),'https://www.csrc.gov.cn').href}catch{return ''}}
+function parseDate(s=''){const m=String(s).match(/(20\d{2})[-年\/.](\d{1,2})[-月\/.](\d{1,2})/);return m?`${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`:''}
+function inferType(title,text){const s=`${title} ${text}`;if(/市场禁入|证券市场禁入/.test(s))return'市场禁入';if(/行政处罚|处罚决定书|没收违法所得|罚款|行政处罚决定/.test(s))return'行政处罚';if(/纪律处分|纪律委员会|纪律处分决定/.test(s))return'纪律处分';if(/警示函|出具警示函/.test(s))return'警示函';if(/监管措施|责令改正|监管谈话|暂不受理|暂停.*业务|限制.*业务|整改/.test(s))return'监管措施';if(/诚信档案|诚信记录|诚信信息/.test(s))return'诚信记录';return'其他'}
+function inferLevel(type){return type==='行政处罚'||type==='市场禁入'?'high':type==='警示函'||type==='监管措施'||type==='纪律处分'?'medium':'low'}
+function riskLike(title,text){return /行政处罚|处罚决定书|处罚|监管措施|警示函|责令改正|监管谈话|市场禁入|暂不受理|暂停.*业务|限制.*业务|整改|纪律处分|诚信档案|诚信记录/.test(`${title} ${text}`)}
+function inferMeasure(s){const hits=['责令改正','出具警示函','警示函','监管谈话','暂不受理行政许可','暂停相关业务','限制业务活动','市场禁入','整改','行政处罚','罚款','纪律处分'];return[...new Set(hits.filter(x=>String(s).includes(x)))].join('、')}
+function inferAgency(text,url){const m=String(text).match(/(中国证监会|[\u4e00-\u9fa5]{2,12}证监局)/);if(m)return m[1];try{const host=new URL(url).hostname.split('.')[0];if(host&&host!=='www')return host+'证监局'}catch{}return'中国证监会'}
+async function fetchText(url,timeoutMs=6500){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);try{const r=await fetch(url,{redirect:'follow',signal:controller.signal,headers:{'User-Agent':'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1','Accept':'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8','Accept-Language':'zh-CN,zh;q=0.9'}});if(!r.ok)throw new Error(`上游返回 ${r.status}`);return await r.text()}finally{clearTimeout(timer)}}
 
-function decodeHtml(s = '') {
-  return String(s)
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
-    .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&').replace(/&#39;/g, "'");
-}
-
-function clean(s = '') {
-  return decodeHtml(s)
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ').trim();
-}
-
-function absUrl(href) {
-  try { return new URL(decodeHtml(href), 'https://www.csrc.gov.cn').href; }
-  catch { return ''; }
-}
-
-function parseDate(s = '') {
-  const m = String(s).match(/(20\d{2})[-年\/.](\d{1,2})[-月\/.](\d{1,2})/);
-  return m ? `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}` : '';
-}
-
-function inferType(title, text) {
-  const s = `${title} ${text}`;
-  if (/市场禁入|证券市场禁入/.test(s)) return '市场禁入';
-  if (/行政处罚|处罚决定书|没收违法所得|罚款|行政处罚决定/.test(s)) return '行政处罚';
-  if (/纪律处分|纪律委员会|纪律处分决定/.test(s)) return '纪律处分';
-  if (/警示函|出具警示函/.test(s)) return '警示函';
-  if (/监管措施|责令改正|监管谈话|暂不受理|暂停.*业务|限制.*业务|整改/.test(s)) return '监管措施';
-  if (/诚信档案|诚信记录|诚信信息/.test(s)) return '诚信记录';
-  return '其他';
-}
-
-function inferLevel(type) {
-  if (type === '行政处罚' || type === '市场禁入') return 'high';
-  if (type === '警示函' || type === '监管措施' || type === '纪律处分') return 'medium';
-  return 'low';
-}
-
-function riskLike(title, text) {
-  return /行政处罚|处罚决定书|处罚|监管措施|警示函|责令改正|监管谈话|市场禁入|暂不受理|暂停.*业务|限制.*业务|整改|纪律处分|诚信档案|诚信记录/.test(`${title} ${text}`);
-}
-
-function inferMeasure(s) {
-  const hits = ['责令改正','出具警示函','警示函','监管谈话','暂不受理行政许可','暂停相关业务','限制业务活动','市场禁入','整改','行政处罚','罚款','纪律处分'];
-  return [...new Set(hits.filter(x => String(s).includes(x)))].join('、');
-}
-
-function inferAgency(text, url) {
-  const m = String(text).match(/(中国证监会|[\u4e00-\u9fa5]{2,12}证监局)/);
-  if (m) return m[1];
-  try {
-    const host = new URL(url).hostname.split('.')[0];
-    if (host && host !== 'www') return host + '证监局';
-  } catch {}
-  return '中国证监会';
-}
-
-async function fetchText(url, timeoutMs = 6500) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, {
-      redirect: 'follow', signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1',
-        'Accept': 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-CN,zh;q=0.9'
-      }
-    });
-    if (!r.ok) throw new Error(`上游返回 ${r.status}`);
-    return await r.text();
-  } finally { clearTimeout(timer); }
-}
-
-function parseSearch(html, subject, relation = '管理人') {
-  const out = [];
-  const re = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html))) {
-    const url = absUrl(m[1]);
-    const title = clean(m[2]);
-    if (!url || !title || !url.includes('csrc.gov.cn') || title.length < 4) continue;
-    const context = clean(html.slice(Math.max(0, m.index - 1600), Math.min(html.length, m.index + 3000)));
-    if (!riskLike(title, context)) continue;
-    const blob = `${title} ${context}`;
-    const type = inferType(title, context);
-    const key = `${url}|${title}`;
-    if (out.some(x => x.key === key)) continue;
-    out.push({
-      key, title, url, date: parseDate(blob), type, level: inferLevel(type),
-      agency: inferAgency(context, url), subject, relation,
-      summary: title, measure: inferMeasure(blob), result: ''
-    });
-    if (out.length >= 100) break;
+function parseSearch(html,subject,relation,requiredTokens=[]){
+  const out=[];const re=/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;let m;
+  while((m=re.exec(html))){
+    const url=absUrl(m[1]),title=clean(m[2]);
+    if(!url||!title||!url.includes('csrc.gov.cn')||title.length<4)continue;
+    const context=clean(html.slice(Math.max(0,m.index-1100),Math.min(html.length,m.index+2200)));
+    const blob=`${title} ${context}`;
+    if(!riskLike(title,context))continue;
+    if(requiredTokens.length&&!requiredTokens.some(t=>t&&blob.includes(t)))continue;
+    const type=inferType(title,context),key=`${url}|${title}`;
+    if(out.some(x=>x.key===key))continue;
+    out.push({key,title,url,date:parseDate(blob),type,level:inferLevel(type),agency:inferAgency(context,url),subject,relation,summary:extractSummary(title,context),measure:inferMeasure(blob),result:extractResult(context)});
+    if(out.length>=80)break;
   }
   return out;
 }
 
-function searchParams(term, pageNum) {
-  return new URLSearchParams({
-    siteCode: 'bm56000001', checkHandle: '1', pageSize: '20', pageNum: String(pageNum),
-    searchWord: term, column: '全部', searchSource: '0', govWorkBean: '{}', countKey: '0',
-    uc: '0', left_right_index: '0', orderBy: '2', wordPlace: '0'
-  }).toString();
+function extractSummary(title,text){
+  const s=clean(text);
+  const hits=['认定','经查','经查明','证监会认定','我局认定','违法事实'];
+  for(const h of hits){const i=s.indexOf(h);if(i>=0){const part=s.slice(i,Math.min(s.length,i+180));const stop=part.search(/[。！？]/);return part.slice(0,stop>30?stop+1:180).trim()}}
+  return title;
 }
-
-async function searchCsrc(subject, term, pageNum, relation) {
-  const html = await fetchText(`${CSRC_SEARCH}?${searchParams(term, pageNum)}`);
-  return parseSearch(html, subject, relation);
-}
-
-const MANAGERS = [
-  ['华夏','华夏基金管理有限公司'],['易方达','易方达基金管理有限公司'],['广发','广发基金管理有限公司'],
-  ['富国','富国基金管理有限公司'],['南方','南方基金管理股份有限公司'],['国泰','国泰基金管理有限公司'],
-  ['嘉实','嘉实基金管理有限公司'],['建信','建信基金管理有限责任公司'],['天弘','天弘基金管理有限公司'],
-  ['华宝','华宝基金管理有限公司'],['摩根','摩根基金管理（中国）有限公司'],['国富','国海富兰克林基金管理有限公司'],
-  ['万家','万家基金管理有限公司'],['浦银','浦银安盛基金管理有限公司'],['博时','博时基金管理有限公司'],
-  ['中欧','中欧基金管理有限公司'],['工银瑞信','工银瑞信基金管理有限公司'],['招商','招商基金管理有限公司'],
-  ['鹏华','鹏华基金管理有限公司'],['交银施罗德','交银施罗德基金管理有限公司'],['兴证全球','兴证全球基金管理有限公司'],
-  ['银华','银华基金管理股份有限公司'],['华安','华安基金管理有限公司'],['汇添富','汇添富基金管理股份有限公司'],
-  ['兴业','兴业基金管理有限公司'],['中银','中银基金管理有限公司'],['平安','平安基金管理有限公司'],
-  ['诺安','诺安基金管理有限公司'],['长城','长城基金管理有限公司'],['东方','东方基金管理股份有限公司'],
-  ['长信','长信基金管理有限责任公司'],['华泰柏瑞','华泰柏瑞基金管理有限公司'],['浙商','浙商基金管理有限公司'],
-  ['前海开源','前海开源基金管理有限公司']
-];
-
-function managerFromName(name = '') {
-  const hit = MANAGERS.find(([key]) => String(name).includes(key));
-  return hit ? hit[1] : '';
-}
-
-async function identifyManager(code, name) {
-  const known = managerFromName(name);
-  if (known) return known;
-  try {
-    const text = clean(await fetchText(EASTMONEY_FUND(code), 4500));
-    const patterns = [
-      /基金管理人[：:\s]*([\u4e00-\u9fa5A-Za-z0-9（）()·\-]{4,100}基金管理(?:有限公司|股份有限公司|有限责任公司))/,
-      /管理人[：:\s]*([\u4e00-\u9fa5A-Za-z0-9（）()·\-]{4,100}基金管理(?:有限公司|股份有限公司|有限责任公司))/
-    ];
-    for (const p of patterns) { const m = text.match(p); if (m) return m[1].trim(); }
-  } catch {}
+function extractResult(text){
+  const s=clean(text);
+  const patterns=[/罚款[^。；]{0,80}(?:元|万元)/,/没收[^。；]{0,80}(?:元|万元)/,/予以[^。；]{0,100}(?:警告|警示)/,/采取[^。；]{0,100}监管措施/];
+  for(const p of patterns){const m=s.match(p);if(m)return m[0].trim()}
   return '';
 }
+function searchParams(term,pageNum){return new URLSearchParams({siteCode:'bm56000001',checkHandle:'1',pageSize:'20',pageNum:String(pageNum),searchWord:term,column:'全部',searchSource:'0',govWorkBean:'{}',countKey:'0',uc:'0',left_right_index:'0',orderBy:'2',wordPlace:'0'}).toString()}
+async function searchCsrc(subject,term,pageNum,relation,requiredTokens){const html=await fetchText(`${CSRC_SEARCH}?${searchParams(term,pageNum)}`);return parseSearch(html,subject,relation,requiredTokens)}
 
-function buildTerms(manager) {
-  const base = manager.replace(/基金管理(?:有限公司|股份有限公司|有限责任公司)$/, '');
-  return [...new Set([
-    manager,
-    `${base} 行政处罚`, `${base} 监管措施`, `${base} 警示函`,
-    `${base} 责令改正`, `${base} 监管谈话`, `${base} 市场禁入`, `${base} 纪律处分`, `${base} 诚信`
-  ])];
+const MANAGERS=[['华夏','华夏基金管理有限公司'],['易方达','易方达基金管理有限公司'],['广发','广发基金管理有限公司'],['富国','富国基金管理有限公司'],['南方','南方基金管理股份有限公司'],['国泰','国泰基金管理有限公司'],['嘉实','嘉实基金管理有限公司'],['建信','建信基金管理有限责任公司'],['天弘','天弘基金管理有限公司'],['华宝','华宝基金管理有限公司'],['摩根','摩根基金管理（中国）有限公司'],['国富','国海富兰克林基金管理有限公司'],['万家','万家基金管理有限公司'],['浦银','浦银安盛基金管理有限公司'],['博时','博时基金管理有限公司'],['中欧','中欧基金管理有限公司'],['工银瑞信','工银瑞信基金管理有限公司'],['招商','招商基金管理有限公司'],['鹏华','鹏华基金管理有限公司'],['交银施罗德','交银施罗德基金管理有限公司'],['兴证全球','兴证全球基金管理有限公司'],['银华','银华基金管理股份有限公司'],['华安','华安基金管理有限公司'],['汇添富','汇添富基金管理股份有限公司'],['兴业','兴业基金管理有限公司'],['中银','中银基金管理有限公司'],['平安','平安基金管理有限公司'],['诺安','诺安基金管理有限公司'],['长城','长城基金管理有限公司'],['东方','东方基金管理股份有限公司'],['长信','长信基金管理有限责任公司'],['华泰柏瑞','华泰柏瑞基金管理有限公司'],['浙商','浙商基金管理有限公司'],['前海开源','前海开源基金管理有限公司']];
+function managerFromName(name=''){const hit=MANAGERS.find(([key])=>String(name).includes(key));return hit?hit[1]:''}
+function extractManagers(raw=''){
+  const candidates=[];
+  const text=clean(raw);
+  const re=/基金经理[：:\s]{0,20}([\u4e00-\u9fa5]{2,6}(?:\s*[、,，]\s*[\u4e00-\u9fa5]{2,6}){0,8})/g;let m;
+  while((m=re.exec(text)))candidates.push(...m[1].split(/[、,，]/).map(x=>x.trim()).filter(x=>/^[\u4e00-\u9fa5]{2,6}$/.test(x)));
+  return [...new Set(candidates)].slice(0,8)
+}
+async function identifyFundInfo(code,name){
+  const manager=managerFromName(name);let managers=[];let raw='';
+  try{raw=await fetchText(EASTMONEY_FUND(code),4500);if(!manager){const text=clean(raw);const pats=[/基金管理人[：:\s]*([\u4e00-\u9fa5A-Za-z0-9（）()·\-]{4,100}基金管理(?:有限公司|股份有限公司|有限责任公司))/,/管理人[：:\s]*([\u4e00-\u9fa5A-Za-z0-9（）()·\-]{4,100}基金管理(?:有限公司|股份有限公司|有限责任公司))/];for(const p of pats){const x=text.match(p);if(x){return{manager:x[1].trim(),managers:extractManagers(raw)}}}}managers=extractManagers(raw)}catch{}
+  return{manager,managers}
 }
 
-async function runJobs(subject, terms) {
-  const jobs = [];
-  for (const term of terms) for (let page = 1; page <= 2; page++) jobs.push({ term, page });
-  const all = [];
-  const concurrency = 6;
-  for (let i = 0; i < jobs.length; i += concurrency) {
-    const batch = jobs.slice(i, i + concurrency);
-    const results = await Promise.allSettled(batch.map(j => searchCsrc(subject, j.term, j.page, '管理人')));
-    for (const r of results) if (r.status === 'fulfilled') all.push(...r.value);
-  }
-  return all;
+async function runJobs(fundName,manager,managers){
+  const jobs=[];
+  if(fundName)jobs.push({term:fundName,page:1,relation:'基金产品关联记录',tokens:[fundName]});
+  if(manager){jobs.push({term:manager,page:1,relation:'基金管理人关联记录',tokens:[manager]});jobs.push({term:manager,page:2,relation:'基金管理人关联记录',tokens:[manager]})}
+  for(const person of managers){jobs.push({term:person,page:1,relation:'基金经理关联记录',tokens:[person]});jobs.push({term:person,page:2,relation:'基金经理关联记录',tokens:[person]})}
+  const all=[];const concurrency=5;
+  for(let i=0;i<jobs.length;i+=concurrency){const batch=jobs.slice(i,i+concurrency);const results=await Promise.allSettled(batch.map(j=>searchCsrc(j.term,j.term,j.page,j.relation,j.tokens)));for(const r of results)if(r.status==='fulfilled')all.push(...r.value)}
+  return all
 }
 
-async function risk(request) {
-  const u = new URL(request.url);
-  const code = (u.searchParams.get('code') || '').replace(/\D/g, '').slice(0, 6);
-  const name = u.searchParams.get('name') || '';
-  const force = u.searchParams.get('force') === '1';
-  if (!code) return responseJSON({ error: 'missing code' }, 400);
-
-  const cacheKey = new Request(new URL(`/api/risk?v=${CACHE_VERSION}&code=${code}&name=${encodeURIComponent(name)}`, u.origin).href);
-  const cache = caches.default;
-  if (!force) {
-    const cached = await cache.match(cacheKey);
-    if (cached) {
-      const data = await cached.json();
-      data.cached = true;
-      return responseJSON(data);
-    }
-  }
-
-  const manager = await identifyManager(code, name);
-  if (!manager) return responseJSON({
-    ok: false, code, name, manager: '', records: [],
-    error: '无法识别基金管理人，请稍后重试或查看基金名称是否完整'
-  });
-
-  const terms = buildTerms(manager);
-  const all = await runJobs(manager, terms);
-  const seen = new Set();
-  const records = all.filter(x => {
-    const k = x.url + '|' + x.title;
-    if (seen.has(k)) return false;
-    seen.add(k); return true;
-  }).sort((a,b) => (b.date || '0000').localeCompare(a.date || '0000')).map(({key,...x}) => x).slice(0, 300);
-
-  const counts = {};
-  for (const x of records) counts[x.type] = (counts[x.type] || 0) + 1;
-  const data = {
-    ok: true, code, name, manager, records, counts, queryTerms: terms,
-    updatedAt: new Date().toISOString(), source: '中国证券监督管理委员会公开信息检索',
-    partial: records.length === 0
-  };
-
-  const cacheResp = new Response(JSON.stringify(data), {
-    headers: { 'Content-Type': 'application/json;charset=UTF-8', 'Cache-Control': `public,max-age=${TTL}` }
-  });
-  await cache.put(cacheKey, cacheResp.clone());
-  return responseJSON(data);
+function betterSubject(record,manager,managers,fundName){
+  const blob=`${record.title} ${record.summary}`;
+  const person=managers.find(x=>blob.includes(x));
+  if(person)return `${person}（时任${manager}基金经理）`;
+  if(blob.includes(manager)||record.relation.includes('管理人'))return manager;
+  if(fundName&&blob.includes(fundName))return `${fundName}相关记录`;
+  return record.subject||manager
 }
 
-export default {
-  async fetch(request, env) {
-    const u = new URL(request.url);
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
-    if (u.pathname === '/api/risk' && request.method === 'GET') return risk(request);
-    if (env.ASSETS) return env.ASSETS.fetch(request);
-    return new Response('Fund PWA v14.1', { status: 200, headers: { 'Content-Type': 'text/plain;charset=UTF-8' } });
-  }
-};
+async function risk(request){
+  const u=new URL(request.url),code=(u.searchParams.get('code')||'').replace(/\D/g,'').slice(0,6),name=u.searchParams.get('name')||'',force=u.searchParams.get('force')==='1';
+  if(!code)return responseJSON({error:'missing code'},400);
+  const cacheKey=new Request(new URL(`/api/risk?v=${CACHE_VERSION}&code=${code}&name=${encodeURIComponent(name)}`,u.origin).href),cache=caches.default;
+  if(!force){const cached=await cache.match(cacheKey);if(cached){const data=await cached.json();data.cached=true;return responseJSON(data)}}
+  const info=await identifyFundInfo(code,name),manager=info.manager,managers=info.managers||[];
+  if(!manager)return responseJSON({ok:false,code,name,manager:'',managers,records:[],error:'无法识别基金管理人，请稍后重试或查看基金名称是否完整'});
+  const all=await runJobs(name,manager,managers),seen=new Set();
+  const records=all.filter(x=>{const k=x.url+'|'+x.title;if(seen.has(k))return false;seen.add(k);return true}).sort((a,b)=>(b.date||'0000').localeCompare(a.date||'0000')).map(x=>({...x,subject:betterSubject(x,manager,managers,name)})).slice(0,300);
+  const counts={};for(const x of records)counts[x.type]=(counts[x.type]||0)+1;
+  const data={ok:true,code,name,manager,managers,records,counts,updatedAt:new Date().toISOString(),source:'中国证券监督管理委员会公开信息检索',partial:records.length===0};
+  await cache.put(cacheKey,new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json;charset=UTF-8','Cache-Control':`public,max-age=${TTL}`}}));
+  return responseJSON(data)
+}
+
+export default {async fetch(request,env){const u=new URL(request.url);if(request.method==='OPTIONS')return new Response(null,{status:204,headers:CORS});if(u.pathname==='/api/risk'&&request.method==='GET')return risk(request);if(env.ASSETS)return env.ASSETS.fetch(request);return new Response('Fund PWA v14.2',{status:200,headers:{'Content-Type':'text/plain;charset=UTF-8'}})}};
