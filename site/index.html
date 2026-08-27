@@ -6,6 +6,7 @@
 <meta name="theme-color" content="#f7f8fa">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-touch-icon" content="./icon.png">
+<link rel="manifest" href="./manifest.json">
 <link rel="stylesheet" href="./style.css">
 <title>基金季报</title>
 </head>
@@ -15,7 +16,7 @@
 <main id="main"></main>
 <nav class="tabbar"><button id="searchTab" class="tab active"><span>⌕</span><small>搜索</small></button><button id="favTab" class="tab"><span>★</span><small>自选</small></button></nav>
 </div>
-<script src="./risk-db.js"></script>
 <script src="./app.js"></script>
+<script>if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}))}</script>
 </body>
 </html>
