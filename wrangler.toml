@@ -1,0 +1,7 @@
+name = "fund-report-pwa-v12"
+main = "worker.js"
+compatibility_date = "2026-08-27"
+
+[assets]
+directory = "./site"
+not_found_handling = "single-page-application"

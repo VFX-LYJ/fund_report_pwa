@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#f7f8fa">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icon.png">
+<link rel="stylesheet" href="./style.css">
+<title>基金季报</title>
+</head>
+<body>
+<div class="app">
+<header class="topbar">
+  <div><div class="brand">基金季报</div><div class="subtitle">持仓 · 季报 · 自选</div></div>
+</header>
+<main id="main"></main>
+<nav class="tabbar">
+  <button id="searchTab" class="tab active"><span>⌕</span><small>搜索</small></button>
+  <button id="favTab" class="tab"><span>★</span><small>自选</small></button>
+</nav>
+</div>
+<script src="./risk-db.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
