@@ -44,11 +44,11 @@ async function fetchRiskApi(code,name){
 }
 function riskPage(code,name){
   const u=sourceUrls(code);
-  main.innerHTML='<div class="risk-head"><button class="back" id="riskBack">‹ 返回基金</button><div><div class="risk-title">历史风险</div><div class="risk-sub">自动监管风险数据库 · 官方原文可追溯</div></div><button class="risk-refresh" id="riskRefresh">↻</button></div>'+
+  main.innerHTML='<div class="risk-head"><button class="back" id="riskBack">‹ 返回基金</button><div><div class="risk-title">历史风险</div><div class="risk-sub">自动监管风险数据库 · 多关键词多页检索</div></div><button class="risk-refresh" id="riskRefresh">↻</button></div>'+
   '<div class="risk-summary" id="riskSummary"><div class="risk-loading">正在自动检索证监会公开记录……</div></div>'+
-  '<div class="risk-filter" id="riskFilter"><button class="on" data-type="全部">全部</button><button data-type="行政处罚">行政处罚</button><button data-type="监管措施">监管措施</button><button data-type="市场禁入">市场禁入</button><button data-type="其他">其他</button></div>'+
+  '<div class="risk-filter" id="riskFilter"><button class="on" data-type="全部">全部</button><button data-type="行政处罚">行政处罚</button><button data-type="监管措施">监管措施</button><button data-type="市场禁入">市场禁入</button><button data-type="诚信记录">诚信记录</button><button data-type="其他">其他</button></div>'+
   '<div id="riskList" class="risk-list"></div>'+
-  '<div class="risk-note">风险服务按“基金代码 → 基金管理人 → 证监会公开监管记录”自动关联；同时尽量识别基金经理/责任人员关联记录。管理人或个人被监管，不等于本基金产品本身违法。结果保留官方原文链接。</div>'+
+  '<div class="risk-note">风险服务按“基金代码 → 基金管理人 → 多关键词、多页证监会公开记录”自动关联；覆盖行政处罚、监管措施、市场禁入、诚信记录，并尽量识别基金经理/责任人员关联记录。管理人或个人被监管，不等于本基金产品本身违法。结果保留官方原文链接。</div>'+
   '<div class="source">信息来源：<button class="plain-link" id="riskOfficial">中国证券监督管理委员会 ↗</button></div>';
 
   let data={manager:'',records:[]},filter='全部';
@@ -64,7 +64,7 @@ function riskPage(code,name){
     try{
       data=await fetchRiskApi(code,name);
       const records=data.records||[];
-      const counts={行政处罚:records.filter(x=>x.type==='行政处罚').length,监管措施:records.filter(x=>x.type==='监管措施').length,市场禁入:records.filter(x=>x.type==='市场禁入').length};
+      const counts={行政处罚:records.filter(x=>x.type==='行政处罚').length,监管措施:records.filter(x=>x.type==='监管措施').length,市场禁入:records.filter(x=>x.type==='市场禁入').length,诚信记录:records.filter(x=>x.type==='诚信记录').length};
       sum.innerHTML='<div class="risk-manager"><span>基金</span><b>'+esc(name)+'</b><em>'+esc(code)+'</em></div><div class="risk-manager"><span>管理人</span><b>'+esc(data.manager||'自动识别失败')+'</b></div><div class="risk-manager"><span>数据状态</span><b>'+esc(data.cached?'缓存结果':'刚刚检索')+'</b></div><div class="risk-stats"><div><strong>'+records.length+'</strong><small>关联记录</small></div><div><strong>'+counts['行政处罚']+'</strong><small>行政处罚</small></div><div><strong>'+counts['监管措施']+'</strong><small>监管措施</small></div></div>';
       render();
     }catch(e){
