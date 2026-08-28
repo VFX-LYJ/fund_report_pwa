@@ -2,6 +2,11 @@ name = "broad-star-cbc0"
 main = "worker.js"
 compatibility_date = "2026-08-27"
 
+# 管理员风险数据库测试密码。
+# 正式使用时建议改为 Cloudflare Secret：ADMIN_PASSWORD。
+[vars]
+ADMIN_PASSWORD = "lyj20280828"
+
 # KV namespace 暂不填真实 ID。
 # 创建 Cloudflare KV 后，将下面两行取消注释并替换成你的 namespace ID：
 # [[kv_namespaces]]
