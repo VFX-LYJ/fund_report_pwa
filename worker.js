@@ -1,6 +1,7 @@
-const CACHE_VERSION = 'v22.1-upstream-fetch-debug';
+const CACHE_VERSION = 'v23-kv-only-risk';
 const RATE_WINDOW = 10 * 60;
 const RATE_LIMIT = 5;
+
 const RELATIONS = ['manager', 'person', 'fund'];
 const RISK_TYPES = ['行政处罚', '警示函', '监管措施', '市场禁入', '纪律处分', '其他'];
 
@@ -37,15 +38,6 @@ const MANAGERS = [
   ['大成', '大成基金管理有限公司', ['大成基金'], []]
 ];
 
-const SOURCES = {
-  csrc: { name: '证监会总部', base: 'https://www.csrc.gov.cn/csrc/c106259/common_list_gd.shtml' },
-  beijing: { name: '北京证监局', base: 'https://www.csrc.gov.cn/csrc/c100045/common_list_gd.shtml' },
-  shanghai: { name: '上海证监局', base: 'https://www.csrc.gov.cn/csrc/c100053/common_list_gd.shtml' }
-};
-const SOURCE_ORDER = ['csrc', 'beijing', 'shanghai'];
-const RISK_TITLE = /行政处罚决定书|行政处罚事先告知书|行政处罚|市场禁入决定书|证券市场禁入|警示函|监管措施决定书|行政监管措施|采取.*监管措施|责令改正|监管谈话|纪律处分决定书|纪律处分|暂停.*业务|限制.*业务|认定为不适当人选|公开谴责/i;
-const NON_RISK = /证监会发布|证监会优化|证监会组织|证监会召开|培训|会议|致辞|讲话|新闻|政策解读|行业标准|工作方案|工作会议|公告|通知|答记者问|新闻发布会|活动|论坛|研讨|座谈|征求意见|意见稿|制度建设|数据模型/i;
-
 function response(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -59,22 +51,8 @@ function response(data, status = 200) {
   });
 }
 
-function norm(v) {
-  return String(v || '').replace(/[（）()\s\u3000]/g, '').toLowerCase();
-}
-
-function clean(v) {
-  return String(v || '')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+function norm(value) {
+  return String(value || '').replace(/[（）()\s\u3000]/g, '').toLowerCase();
 }
 
 function managerMeta(manager = '') {
@@ -92,294 +70,59 @@ function excludes(manager = '') {
   return managerMeta(manager)[3] || [];
 }
 
-function entityMatches(value, manager) {
-  const n = norm(value);
-  if (excludes(manager).some(x => n.includes(norm(x)))) return false;
-  return aliases(manager).some(x => n.includes(norm(x)));
+function managerMatches(value, manager) {
+  const text = norm(value);
+  if (excludes(manager).some(x => text.includes(norm(x)))) return false;
+  return aliases(manager).some(x => text.includes(norm(x)));
 }
 
-function inferManager(code = '', name = '') {
-  const text = `${code} ${name}`;
-  const byCode = {
+function inferManager(code = '', name = '', supplied = '') {
+  if (supplied) return supplied;
+  const normalizedCode = String(code).replace(/\D/g, '');
+  const known = {
     '000001': '华夏基金管理有限公司',
     '110011': '易方达基金管理有限公司'
   };
-  const normalizedCode = String(code).replace(/\D/g, '');
-  if (byCode[normalizedCode]) return byCode[normalizedCode];
+  if (known[normalizedCode]) return known[normalizedCode];
+  const text = `${code} ${name}`;
   for (const x of MANAGERS) {
-    if (x[2].some(a => text.includes(a)) || text.includes(x[0])) return x[1];
+    if (text.includes(x[0]) || x[2].some(a => text.includes(a))) return x[1];
   }
   return '';
 }
 
-function extractDate(v = '') {
-  const m = String(v).match(/(20\d{2})[-年\/.](\d{1,2})[-月\/.](\d{1,2})/);
-  return m ? `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}` : '';
+function managerKey(manager) {
+  return `risk:manager:${manager}`;
 }
 
-function classifyType(v = '') {
-  if (/市场禁入|证券市场禁入/.test(v)) return '市场禁入';
-  if (/行政处罚/.test(v)) return '行政处罚';
-  if (/纪律处分/.test(v)) return '纪律处分';
-  if (/警示函/.test(v)) return '警示函';
-  if (/监管措施|责令改正|监管谈话|暂停.*业务|限制.*业务|认定为不适当人选|公开谴责/.test(v)) return '监管措施';
-  return '其他';
-}
-
-function level(type) {
-  return type === '行政处罚' || type === '市场禁入'
-    ? 'high'
-    : type === '纪律处分' || type === '警示函' || type === '监管措施'
-      ? 'medium'
-      : 'low';
-}
-
-function listAnchors(html, base) {
-  const out = [];
-  const re = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-  while ((m = re.exec(html))) {
-    let url;
-    try {
-      url = new URL(m[1].replace(/&amp;/g, '&'), base).href;
-    } catch {
-      continue;
-    }
-    const title = clean(m[2]);
-    if (title.length < 5) continue;
-    const around = clean(html.slice(Math.max(0, m.index - 450), Math.min(html.length, m.index + 700)));
-    out.push({ url, title, date: extractDate(`${title} ${around}`) });
-  }
-  return out;
-}
-
-// CSRC occasionally responds slowly from Cloudflare Workers. The old 8s timeout
-// caused every source to become "fetched:false" before the upstream had a chance
-// to return. Keep the timeout long enough for the official site, while still
-// bounding a single request so force=1 cannot hang indefinitely.
-const UPSTREAM_TIMEOUT = 25000;
-const DETAIL_TIMEOUT = 18000;
-
-async function fetchUpstream(url, timeout = UPSTREAM_TIMEOUT) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  const startedAt = Date.now();
-  try {
-    const responseUpstream = await fetch(url, {
-      redirect: 'follow',
-      signal: controller.signal,
-      cf: { cacheTtl: 0, cacheEverything: false },
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.5',
-        'Referer': 'https://www.csrc.gov.cn/',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-      }
-    });
-    const finalUrl = responseUpstream.url || url;
-    if (!responseUpstream.ok) {
-      throw new Error(`上游HTTP ${responseUpstream.status}`);
-    }
-    const text = await responseUpstream.text();
-    return {
-      text,
-      meta: {
-        requestedUrl: url,
-        finalUrl,
-        status: responseUpstream.status,
-        elapsedMs: Date.now() - startedAt,
-        contentLength: text.length
-      }
-    };
-  } catch (e) {
-    if (e?.name === 'AbortError') {
-      throw new Error(`上游请求超时（${timeout / 1000}s）`);
-    }
-    throw e;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function cacheRequest(key) {
-  return new Request(`https://fund-risk-cache.invalid/${encodeURIComponent(key)}`);
-}
-
-async function storageGet(env, key) {
-  if (env?.RISK_KV) {
-    try { return await env.RISK_KV.get(key, 'json'); } catch { return null; }
-  }
-  try {
-    const r = await caches.default.match(cacheRequest(key));
-    return r ? await r.json() : null;
-  } catch {
-    return null;
-  }
-}
-
-async function storagePut(env, key, value, ttl = 30 * 86400) {
-  if (env?.RISK_KV) {
-    await env.RISK_KV.put(key, JSON.stringify(value), { expirationTtl: ttl });
-    return;
-  }
-  try {
-    await caches.default.put(
-      cacheRequest(key),
-      new Response(JSON.stringify(value), {
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': `public,max-age=${ttl}` }
-      })
-    );
-  } catch {}
-}
-
-function managerKey(m) {
-  return `risk:manager:${m}`;
-}
-
-function recordKey(r) {
-  return `${norm(r?.url)}|${norm(r?.title)}`;
+function recordKey(record) {
+  return `${norm(record?.url)}|${norm(record?.title)}`;
 }
 
 function dedupe(records = []) {
   const map = new Map();
-  for (const r of records) {
-    const k = r.key || recordKey(r);
-    if (k && !map.has(k)) map.set(k, { ...r, key: k });
+  for (const record of records) {
+    const key = record.key || recordKey(record);
+    if (key && !map.has(key)) map.set(key, { ...record, key });
   }
-  return [...map.values()].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  return [...map.values()].sort((a, b) =>
+    String(b.date || '').localeCompare(String(a.date || ''))
+  );
 }
 
-async function readManagerData(env, manager) {
-  const v = await storageGet(env, managerKey(manager));
-  if (Array.isArray(v)) return { manager, records: v };
-  return v || { manager, records: [] };
+async function getRiskData(env, manager) {
+  if (!env.RISK_KV) return null;
+  const value = await env.RISK_KV.get(managerKey(manager), 'json');
+  if (!value) return null;
+  if (Array.isArray(value)) return { manager, records: value };
+  return value;
 }
 
-async function writeManagerData(env, manager, data) {
-  await storagePut(env, managerKey(manager), data);
-}
-
-function makeRecord(item, body, sourceId, manager) {
-  const full = `${item.title} ${body}`;
-  const type = classifyType(full);
-  const has = entityMatches(full, manager);
-  const conf = has && RISK_TITLE.test(item.title)
-    ? 'high'
-    : has && RISK_TITLE.test(full)
-      ? 'medium'
-      : 'low';
-  if (conf === 'low') return null;
-  return {
-    key: `${item.url}|${item.title}`,
-    title: item.title,
-    url: item.url,
-    date: item.date || extractDate(body),
-    type,
-    level: level(type),
-    agency: SOURCES[sourceId].name,
-    subject: manager,
-    relation: 'manager',
-    confidence: conf,
-    measure: type,
-    summary: item.title,
-    query: SOURCES[sourceId].name,
-    updatedAt: new Date().toISOString(),
-    source: 'official'
-  };
-}
-
-async function crawlSource(env, sourceId, manager) {
-  const source = SOURCES[sourceId];
-  const debug = {
-    fetched: false,
-    url: source.base,
-    finalUrl: null,
-    httpStatus: null,
-    elapsedMs: null,
-    items: 0,
-    parsed: 0,
-    matched: 0,
-    afterConfidenceFilter: 0,
-    error: null
-  };
-  const records = [];
-
-  let page;
-  try {
-    page = await fetchUpstream(source.base, UPSTREAM_TIMEOUT);
-    debug.fetched = true;
-    debug.finalUrl = page.meta.finalUrl;
-    debug.httpStatus = page.meta.status;
-    debug.elapsedMs = page.meta.elapsedMs;
-  } catch (e) {
-    debug.error = e?.message || '请求失败';
-    return { records, debug };
+async function putRiskData(env, manager, value) {
+  if (!env.RISK_KV) {
+    throw new Error('RISK_KV 未绑定，请先在 wrangler.toml 配置 KV namespace');
   }
-
-  const html = page.text;
-  const allAnchors = listAnchors(html, source.base);
-  debug.items = allAnchors.length;
-  const items = allAnchors.filter(x => RISK_TITLE.test(x.title) && !NON_RISK.test(x.title));
-  debug.parsed = items.length;
-
-  // Only fetch a small number of detail pages. The list page itself is enough
-  // to prove upstream connectivity; details are used only to improve confidence.
-  for (const item of items.slice(0, 24)) {
-    if (!entityMatches(item.title, manager)) continue;
-    debug.matched++;
-    try {
-      const detail = await fetchUpstream(item.url, DETAIL_TIMEOUT);
-      const record = makeRecord(item, detail.text, sourceId, manager);
-      if (record) {
-        records.push(record);
-        debug.afterConfidenceFilter++;
-      }
-    } catch {
-      // A detail page failing must not erase a successfully fetched list page.
-      // The list item remains observable through debug.matched.
-    }
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-
-  return { records: dedupe(records), debug };
-}
-
-async function crawlOfficial(env, manager) {
-  const all = [];
-  const sources = {};
-  let fetchedCount = 0;
-
-  for (const sourceId of SOURCE_ORDER) {
-    const result = await crawlSource(env, sourceId, manager);
-    sources[sourceId] = result.debug;
-    all.push(...result.records);
-    if (result.debug.fetched) fetchedCount++;
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-
-  const records = dedupe(all);
-  const status = fetchedCount === 0
-    ? 'failed'
-    : records.length === 0
-      ? 'no_data'
-      : fetchedCount < SOURCE_ORDER.length
-        ? 'partial'
-        : 'success';
-
-  return {
-    records,
-    status,
-    debug: {
-      sources,
-      filterStats: {
-        beforeEntityMatch: Object.values(sources).reduce((n, s) => n + s.parsed, 0),
-        afterEntityMatch: Object.values(sources).reduce((n, s) => n + s.matched, 0),
-        afterConfidenceFilter: records.length
-      }
-    }
-  };
+  await env.RISK_KV.put(managerKey(manager), JSON.stringify(value));
 }
 
 function calcRiskScore(records = []) {
@@ -390,24 +133,29 @@ function calcRiskScore(records = []) {
       reason: '暂未检索到公开监管记录，不代表没有风险'
     };
   }
+
   let penalty = 0;
   const now = Date.now();
-  for (const r of records) {
-    let weight = r.type === '行政处罚' || r.type === '市场禁入'
+
+  for (const record of records) {
+    let weight = record.type === '行政处罚' || record.type === '市场禁入'
       ? 25
-      : r.type === '纪律处分'
+      : record.type === '纪律处分'
         ? 15
-        : r.type === '警示函' || r.type === '监管措施'
+        : record.type === '警示函' || record.type === '监管措施'
           ? 8
           : 3;
-    if (r.date && /^\d{4}-\d{2}-\d{2}$/.test(r.date)) {
-      const years = Math.max(0, (now - Date.parse(r.date)) / 31557600000);
+
+    if (record.date && /^\d{4}-\d{2}-\d{2}$/.test(record.date)) {
+      const years = Math.max(0, (now - Date.parse(record.date)) / 31557600000);
       if (years < 1) weight *= 1.5;
       else if (years < 3) weight *= 1.2;
       else if (years > 5) weight *= 0.6;
     }
+
     penalty += weight;
   }
+
   const score = Math.max(5, Math.round(100 - Math.min(90, penalty)));
   return {
     score,
@@ -416,13 +164,13 @@ function calcRiskScore(records = []) {
   };
 }
 
-function validDate(v) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v));
+function validDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
 }
 
-function allowedRiskUrl(v) {
+function allowedRiskUrl(value) {
   try {
-    const u = new URL(v);
+    const u = new URL(value);
     return /^https?:$/.test(u.protocol) &&
       (u.hostname === 'csrc.gov.cn' || u.hostname.endsWith('.csrc.gov.cn'));
   } catch {
@@ -431,6 +179,10 @@ function allowedRiskUrl(v) {
 }
 
 async function submitRisk(request, env) {
+  if (!env.RISK_KV) {
+    return response({ ok: false, error: '风险数据库尚未配置 KV，暂时无法提交补充记录' }, 503);
+  }
+
   let body;
   try { body = await request.json(); }
   catch { return response({ ok: false, error: '请求数据格式错误' }, 400); }
@@ -452,55 +204,52 @@ async function submitRisk(request, env) {
   if (!RELATIONS.includes(relation)) return response({ ok: false, error: '关联类型无效' }, 400);
   if (!RISK_TYPES.includes(type)) return response({ ok: false, error: '处罚类型无效' }, 400);
   if (!validDate(date)) return response({ ok: false, error: '决定日期格式必须为 YYYY-MM-DD' }, 400);
-  if (!allowedRiskUrl(url)) return response({ ok: false, error: '原文链接必须来自中国证监会或地方证监局官网' }, 400);
+  if (!allowedRiskUrl(url)) {
+    return response({ ok: false, error: '原文链接必须来自中国证监会或地方证监局官网' }, 400);
+  }
 
-  const data = await readManagerData(env, manager);
-  const fingerprint = norm(url) + '|' + norm(title);
-  if ((data.records || []).some(r => recordKey(r) === fingerprint)) {
+  const existing = await getRiskData(env, manager);
+  const fingerprint = `${norm(url)}|${norm(title)}`;
+  if ((existing?.records || []).some(r => recordKey(r) === fingerprint)) {
     return response({ ok: false, error: '该记录已提交过' }, 409);
   }
 
+  const pending = await env.RISK_KV.list({ prefix: 'risk:pending:' });
+  for (const item of pending.keys) {
+    const record = await env.RISK_KV.get(item.name, 'json');
+    if (record?.status === 'pending' && recordKey(record) === fingerprint) {
+      return response({ ok: false, error: '该记录已提交过' }, 409);
+    }
+  }
+
   const rateKey = `risk:submit-rate:${norm(manager)}`;
-  let rate = await storageGet(env, rateKey);
-  if (!rate || Date.now() - rate.startedAt > RATE_WINDOW * 1000) {
+  let rate = await env.RISK_KV.get(rateKey, 'json');
+  if (!rate || Date.now() - rate.startedAt >= RATE_WINDOW * 1000) {
     rate = { count: 0, startedAt: Date.now() };
   }
   if (rate.count >= RATE_LIMIT) {
-    return response({ ok: false, error: '提交过于频繁，请 10 分钟后再试' }, 429);
+    return response({ ok: false, error: '提交过于频繁，同一管理人 10 分钟最多提交 5 条，请稍后再试' }, 429);
   }
-  rate.count++;
-  await storagePut(env, rateKey, rate, RATE_WINDOW);
+  rate.count += 1;
+  await env.RISK_KV.put(rateKey, JSON.stringify(rate), { expirationTtl: RATE_WINDOW });
 
   const id = `risk:pending:${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
   const record = {
-    id,
-    manager,
-    relation,
-    subject,
-    type,
-    date,
-    title,
-    url,
-    summary,
-    code,
-    name,
-    source: 'user',
-    status: 'pending',
-    confidence: 'medium',
+    id, manager, relation, subject, type, date, title, url, summary, code, name,
+    source: 'user', status: 'pending', confidence: 'medium',
     submittedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
-  await storagePut(env, id, record, 90 * 86400);
+
+  await env.RISK_KV.put(id, JSON.stringify(record), { expirationTtl: 90 * 86400 });
   return response({ ok: true, message: '提交成功，等待审核', id });
 }
 
 async function listPending(env) {
-  if (!env.RISK_KV) {
-    return response({ ok: true, records: [], message: '未绑定 RISK_KV，待审列表暂无法枚举' });
-  }
-  const list = await env.RISK_KV.list({ prefix: 'risk:pending:' });
+  if (!env.RISK_KV) return response({ ok: false, error: 'RISK_KV 未绑定' }, 503);
+  const result = await env.RISK_KV.list({ prefix: 'risk:pending:' });
   const records = [];
-  for (const item of list.keys) {
+  for (const item of result.keys) {
     const record = await env.RISK_KV.get(item.name, 'json');
     if (record?.status === 'pending') records.push(record);
   }
@@ -509,7 +258,7 @@ async function listPending(env) {
 }
 
 async function approveRisk(request, env) {
-  if (!env.RISK_KV) return response({ ok: false, error: '审核功能需要绑定 RISK_KV' }, 503);
+  if (!env.RISK_KV) return response({ ok: false, error: 'RISK_KV 未绑定' }, 503);
   let body;
   try { body = await request.json(); }
   catch { return response({ ok: false, error: '请求数据格式错误' }, 400); }
@@ -529,57 +278,106 @@ async function approveRisk(request, env) {
     return response({ ok: true, message: '已拒绝' });
   }
 
-  const data = await readManagerData(env, record.manager);
-  record.status = 'approved';
-  record.source = 'user';
-  record.confidence = 'medium';
-  record.updatedAt = new Date().toISOString();
+  const data = await getRiskData(env, record.manager) || {
+    manager: record.manager,
+    aliases: aliases(record.manager),
+    excludes: excludes(record.manager),
+    records: []
+  };
+
+  const approved = {
+    ...record,
+    source: 'user',
+    status: 'approved',
+    confidence: 'medium',
+    updatedAt: new Date().toISOString()
+  };
+
   data.manager = record.manager;
-  data.records = dedupe([...(data.records || []), record]);
-  await writeManagerData(env, record.manager, data);
-  await env.RISK_KV.put(id, JSON.stringify(record), { expirationTtl: 30 * 86400 });
-  return response({ ok: true, message: '审核通过，已进入正式风险库', record });
+  data.aliases = aliases(record.manager);
+  data.excludes = excludes(record.manager);
+  data.records = dedupe([...(data.records || []), approved]);
+  data.latestDate = data.records.map(r => r.date).filter(Boolean).sort().pop() || null;
+  data.status = 'success';
+  data.version = CACHE_VERSION;
+
+  await putRiskData(env, record.manager, data);
+  await env.RISK_KV.put(id, JSON.stringify(approved), { expirationTtl: 30 * 86400 });
+  return response({ ok: true, message: '审核通过，已进入正式风险库', record: approved });
+}
+
+function makeDebug(data) {
+  const records = data?.records || [];
+  return {
+    storage: {
+      source: 'cloudflare_kv',
+      fetched: Boolean(data),
+      items: records.length,
+      parsed: records.length,
+      matched: records.length
+    },
+    filterStats: {
+      beforeEntityMatch: records.length,
+      afterEntityMatch: records.length,
+      afterConfidenceFilter: records.filter(r => r.confidence !== 'low').length
+    },
+    crawl: {
+      mode: 'domestic_crawler_to_kv',
+      workerFetchOfficialSite: false,
+      lastCrawledAt: data?.lastCrawledAt || null,
+      lastSuccessAt: data?.lastSuccessAt || null,
+      latestDate: data?.latestDate || null
+    }
+  };
 }
 
 async function handleRisk(request, env) {
   const url = new URL(request.url);
   const code = String(url.searchParams.get('code') || '').trim();
   const name = String(url.searchParams.get('name') || '').trim();
-  let manager = String(url.searchParams.get('manager') || '').trim();
-  if (!manager) manager = inferManager(code, name);
-  if (!manager) return response({ ok: false, error: '无法根据基金代码或名称识别管理人，请补充 manager 参数' }, 400);
-
+  const suppliedManager = String(url.searchParams.get('manager') || '').trim();
+  const manager = inferManager(code, name, suppliedManager);
   const force = url.searchParams.get('force') === '1';
-  const stored = await readManagerData(env, manager);
-  let records = dedupe(stored.records || []);
-  let status = stored.status || (records.length ? 'success' : 'no_data');
-  let debug = null;
 
-  if (force || !records.length) {
-    const official = await crawlOfficial(env, manager);
-    debug = official.debug;
-    records = dedupe([...(official.records || []), ...records]);
-    if (records.length) {
-      status = official.status === 'failed' || official.status === 'no_data' ? 'partial' : official.status;
-      await writeManagerData(env, manager, {
-        ...stored,
-        manager,
-        aliases: aliases(manager),
-        excludes: excludes(manager),
-        records,
-        lastCrawledAt: new Date().toISOString(),
-        lastSuccessAt: official.status === 'failed' ? (stored.lastSuccessAt || null) : new Date().toISOString(),
-        latestDate: records.map(r => r.date).filter(Boolean).sort().pop() || stored.latestDate || null,
-        status,
-        source: '中国证监会总部及地方证监局监管措施列表',
-        version: CACHE_VERSION
-      });
-    } else {
-      status = official.status;
-    }
+  if (!manager) {
+    return response({ ok: false, error: '无法根据基金代码或名称识别管理人，请补充 manager 参数' }, 400);
   }
 
-  if (!records.length) status = status === 'failed' ? 'failed' : 'no_data';
+  if (!env.RISK_KV) {
+    return response({
+      ok: true,
+      status: 'failed', manager, code, name, records: [],
+      riskScore: {
+        score: null,
+        level: '数据不足',
+        reason: '风险数据库尚未绑定 KV，暂时无法读取官方监管数据'
+      },
+      dataStatus: '风险数据库未配置',
+      source: 'Cloudflare KV（国内爬虫写入）',
+      ...(force ? { debug: makeDebug(null) } : {})
+    });
+  }
+
+  const data = await getRiskData(env, manager);
+  const records = dedupe(data?.records || []);
+  let status;
+
+  if (records.length > 0) {
+    status = data?.status === 'partial' ? 'partial' : 'success';
+  } else if (data?.status === 'failed') {
+    status = 'failed';
+  } else {
+    status = 'no_data';
+  }
+
+  const riskScore = calcRiskScore(records);
+  const dataStatus = status === 'success'
+    ? '官方监管列表缓存（国内爬虫写入）'
+    : status === 'partial'
+      ? '部分官方来源已写入 KV'
+      : status === 'failed'
+        ? '国内监管数据同步失败'
+        : '暂未检索到公开监管记录';
 
   return response({
     ok: true,
@@ -588,41 +386,24 @@ async function handleRisk(request, env) {
     code,
     name,
     records,
-    riskScore: calcRiskScore(records),
+    riskScore,
     latest: records[0] || null,
-    dataStatus: status === 'success' ? '官方监管列表缓存'
-      : status === 'partial' ? '部分来源成功'
-      : status === 'failed' ? '官方数据源检索失败'
-      : '暂未检索到公开监管记录',
-    source: '中国证监会总部及地方证监局监管措施列表',
-    ...(force ? { debug } : {})
+    dataStatus,
+    source: '中国证监会总部及地方证监局列表（国内爬虫 → KV）',
+    ...(force ? { debug: makeDebug(data) } : {})
   });
 }
 
 async function runScheduled(env) {
-  for (const x of MANAGERS.slice(0, 5)) {
-    const manager = x[1];
-    try {
-      const official = await crawlOfficial(env, manager);
-      const stored = await readManagerData(env, manager);
-      const records = dedupe([...(official.records || []), ...(stored.records || [])]);
-      const now = new Date().toISOString();
-      await writeManagerData(env, manager, {
-        ...stored,
-        manager,
-        aliases: aliases(manager),
-        excludes: excludes(manager),
-        records,
-        lastCrawledAt: now,
-        lastSuccessAt: official.status === 'failed' ? (stored.lastSuccessAt || null) : now,
-        latestDate: records.map(r => r.date).filter(Boolean).sort().pop() || stored.latestDate || null,
-        status: official.status,
-        source: '中国证监会总部及地方证监局监管措施列表',
-        version: CACHE_VERSION
-      });
-    } catch {}
-    await new Promise(resolve => setTimeout(resolve, 1200));
-  }
+  // V23 起 Worker 不再抓取中国证监会官网。
+  // Cron 只记录 Worker/KV 状态，真正的官网抓取由国内任务执行。
+  if (!env.RISK_KV) return;
+  const meta = {
+    lastWorkerCheckAt: new Date().toISOString(),
+    mode: 'domestic_crawler_to_kv',
+    workerDirectFetchOfficialSite: false
+  };
+  await env.RISK_KV.put('risk:meta:worker', JSON.stringify(meta), { expirationTtl: 7 * 86400 });
 }
 
 export default {
@@ -630,13 +411,13 @@ export default {
     if (request.method === 'OPTIONS') return response({ ok: true }, 204);
     const url = new URL(request.url);
     try {
-      if (url.pathname === '/api/risk' && request.method === 'GET') return handleRisk(request, env);
-      if (url.pathname === '/api/risk/submit' && request.method === 'POST') return submitRisk(request, env);
-      if (url.pathname === '/api/risk/pending' && request.method === 'GET') return listPending(env);
-      if (url.pathname === '/api/risk/approve' && request.method === 'POST') return approveRisk(request, env);
+      if (url.pathname === '/api/risk' && request.method === 'GET') return await handleRisk(request, env);
+      if (url.pathname === '/api/risk/submit' && request.method === 'POST') return await submitRisk(request, env);
+      if (url.pathname === '/api/risk/pending' && request.method === 'GET') return await listPending(env);
+      if (url.pathname === '/api/risk/approve' && request.method === 'POST') return await approveRisk(request, env);
       return response({ ok: false, error: 'Not Found' }, 404);
-    } catch (e) {
-      return response({ ok: false, error: e?.message || '服务器内部错误' }, 500);
+    } catch (error) {
+      return response({ ok: false, error: error?.message || '服务器内部错误' }, 500);
     }
   },
 
